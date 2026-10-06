@@ -1,4 +1,8 @@
-import { MINUTE, RateLimiter } from "@convex-dev/rate-limiter";
+import {
+  MINUTE,
+  RateLimiter,
+  type RateLimitConfig,
+} from "@convex-dev/rate-limiter";
 import { ShardedCounter } from "@convex-dev/sharded-counter";
 import { paginator } from "convex-helpers/server/pagination";
 import { paginationOptsValidator } from "convex/server";
@@ -215,11 +219,12 @@ const requestRateLimiter = new RateLimiter(components.rateLimiter);
 const requestRateOptions = (bucket: Doc<"buckets">) => ({
   key: bucket._id,
   config: {
+    applyUpdates: "asynchronously",
     kind: "token bucket" as const,
     rate: bucket.requestsPerMinute!,
     capacity: bucket.requestsPerMinute!,
     period: MINUTE,
-  },
+  } satisfies RateLimitConfig,
 });
 
 // Deployment-wide spend totals (nanodollars), sharded for high write throughput.
