@@ -1,6 +1,11 @@
 import { MINUTE, RateLimiter } from "@convex-dev/rate-limiter";
 import { ShardedCounter } from "@convex-dev/sharded-counter";
-import { paginationOptsValidator } from "convex/server";
+import { paginator } from "convex-helpers/server/pagination";
+import {
+  type PaginationResult,
+  paginationOptsValidator,
+  paginationResultValidator,
+} from "convex/server";
 import { type Infer, v } from "convex/values";
 import { components, internal } from "./_generated/api.js";
 import type { Doc } from "./_generated/dataModel.js";
@@ -2172,19 +2177,11 @@ export const paginateBuckets = query({
     dimension: v.optional(v.string()),
     paginationOpts: paginationOptsValidator,
   },
-  returns: v.object({
-    page: v.array(vBucket),
-    isDone: v.boolean(),
-    continueCursor: v.string(),
-  }),
+  returns: paginationResultValidator(vBucket),
   handler: async (
     ctx,
     { dimension, paginationOpts },
-  ): Promise<{
-    page: Doc<"buckets">[];
-    isDone: boolean;
-    continueCursor: string;
-  }> => {
+  ): Promise<PaginationResult<Doc<"buckets">>> => {
     const options = {
       cursor: paginationOpts.cursor,
       numItems: pageSize(paginationOpts.numItems, 50),
@@ -2198,6 +2195,7 @@ export const paginateBuckets = query({
             .paginate(options);
     const clock = await getSettings(ctx);
     return {
+      ...page,
       page: page.page.map((b) =>
         normalizedBucket(
           b,
@@ -2205,8 +2203,6 @@ export const paginateBuckets = query({
           clock?.reportingMonth ?? monthStamp(),
         ),
       ),
-      isDone: page.isDone,
-      continueCursor: page.continueCursor,
     };
   },
 });
@@ -2265,31 +2261,18 @@ const vAdminEvent = v.object({
 });
 export const paginateAdminEvents = query({
   args: { paginationOpts: paginationOptsValidator },
-  returns: v.object({
-    page: v.array(vAdminEvent),
-    isDone: v.boolean(),
-    continueCursor: v.string(),
-  }),
+  returns: paginationResultValidator(vAdminEvent),
   handler: async (
     ctx,
     { paginationOpts },
-  ): Promise<{
-    page: Doc<"adminEvents">[];
-    isDone: boolean;
-    continueCursor: string;
-  }> => {
-    const page = await ctx.db
+  ): Promise<PaginationResult<Doc<"adminEvents">>> => {
+    return await ctx.db
       .query("adminEvents")
       .order("desc")
       .paginate({
         cursor: paginationOpts.cursor,
         numItems: pageSize(paginationOpts.numItems, 50),
       });
-    return {
-      page: page.page,
-      isDone: page.isDone,
-      continueCursor: page.continueCursor,
-    };
   },
 });
 
@@ -2405,10 +2388,11 @@ export const setBucketLimits = mutation({
     // New empty buckets need no scan. Existing uncapped buckets must catch up
     // before admission can trust their counters or maxConcurrent.
     if (!needsReserve(bucket) && needsReserve(updated)) {
-      const pending = await peekAttributedRequests(
+      const pending = await attributedRequests(
         ctx,
         bucket.dimension,
         bucket.value,
+        null,
       );
       const deltas = await ctx.db
         .query("usageDeltas")
@@ -2440,48 +2424,9 @@ export const setBucketLimits = mutation({
   },
 });
 
-// First RECONCILE_BATCH requests attributed to a bucket, without .paginate():
-// updateBucket is a public mutation that apps call from their own
-// transactions, and only one .paginate() is allowed per transaction.
-async function peekAttributedRequests(
-  ctx: MutationCtx,
-  dimension: string,
-  value: string,
-): Promise<{ page: Doc<"requests">[]; isDone: boolean }> {
-  const n = RECONCILE_BATCH + 1;
-  if (dimension === USER_DIM || dimension === ACTION_DIM) {
-    const rows =
-      dimension === USER_DIM
-        ? await ctx.db
-            .query("requests")
-            .withIndex("userId", (q) => q.eq("userId", value))
-            .take(n)
-        : await ctx.db
-            .query("requests")
-            .withIndex("actionName", (q) => q.eq("actionName", value))
-            .take(n);
-    return {
-      page: rows.slice(0, RECONCILE_BATCH),
-      isDone: rows.length <= RECONCILE_BATCH,
-    };
-  }
-  const tags = await ctx.db
-    .query("requestTags")
-    .withIndex("dim_value", (q) =>
-      q.eq("dimension", dimension).eq("value", value),
-    )
-    .take(n);
-  const requests = await Promise.all(
-    tags
-      .slice(0, RECONCILE_BATCH)
-      .map((t) => ctx.db.get("requests", t.requestId)),
-  );
-  return {
-    page: requests.filter((r): r is Doc<"requests"> => r !== null),
-    isDone: tags.length <= RECONCILE_BATCH,
-  };
-}
-
+// Uses the convex-helpers paginator rather than built-in .paginate():
+// setBucketLimits calls this from app transactions, which may already have
+// used their single built-in .paginate().
 async function attributedRequests(
   ctx: MutationCtx,
   dimension: string,
@@ -2489,7 +2434,7 @@ async function attributedRequests(
   cursor: string | null,
 ) {
   const options = { cursor, numItems: RECONCILE_BATCH };
-  const db = ctx.db;
+  const db = paginator(ctx.db, schema);
   if (dimension === USER_DIM) {
     return db
       .query("requests")
@@ -2518,19 +2463,9 @@ async function attributedRequests(
 }
 
 export const reconcileBucket = internalMutation({
-  args: {
-    bucketId: v.id("buckets"),
-    cursor: v.union(v.string(), v.null()),
-    // Set when `cursor` came from the built-in .paginate(). Jobs scheduled
-    // before the switch carry convex-helpers paginator cursors, which aren't
-    // valid built-in cursors; those restart the scan, which is safe because
-    // already-folded and already-held requests are skipped.
-    builtInCursor: v.optional(v.boolean()),
-  },
+  args: { bucketId: v.id("buckets"), cursor: v.union(v.string(), v.null()) },
   returns: v.null(),
-  handler: async (ctx, args) => {
-    const { bucketId } = args;
-    const cursor = args.builtInCursor ? args.cursor : null;
+  handler: async (ctx, { bucketId, cursor }) => {
     const initial = await ctx.db.get("buckets", bucketId);
     if (!initial) return null;
     const policy = await ctx.db
@@ -2551,7 +2486,6 @@ export const reconcileBucket = internalMutation({
       await ctx.scheduler.runAfter(0, internal.lib.reconcileBucket, {
         bucketId,
         cursor,
-        builtInCursor: true,
       });
       return null;
     }
@@ -2625,7 +2559,6 @@ export const reconcileBucket = internalMutation({
       await ctx.scheduler.runAfter(0, internal.lib.reconcileBucket, {
         bucketId,
         cursor: page.continueCursor,
-        builtInCursor: true,
       });
     } else
       await ctx.db.patch("bucketPolicies", policy._id, { reconciling: false });
