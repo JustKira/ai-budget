@@ -1,6 +1,5 @@
 import { MINUTE, RateLimiter } from "@convex-dev/rate-limiter";
 import { ShardedCounter } from "@convex-dev/sharded-counter";
-import { paginator } from "convex-helpers/server/pagination";
 import {
   type PaginationResult,
   paginationOptsValidator,
@@ -2424,9 +2423,8 @@ export const setBucketLimits = mutation({
   },
 });
 
-// Uses the convex-helpers paginator rather than built-in .paginate():
-// setBucketLimits calls this from app transactions, which may already have
-// used their single built-in .paginate().
+// Built-in .paginate(). Its callers (setBucketLimits, reconcileBucket) are
+// mutations, so this can share a transaction with other paginated reads.
 async function attributedRequests(
   ctx: MutationCtx,
   dimension: string,
@@ -2434,20 +2432,19 @@ async function attributedRequests(
   cursor: string | null,
 ) {
   const options = { cursor, numItems: RECONCILE_BATCH };
-  const db = paginator(ctx.db, schema);
   if (dimension === USER_DIM) {
-    return db
+    return ctx.db
       .query("requests")
       .withIndex("userId", (q) => q.eq("userId", value))
       .paginate(options);
   }
   if (dimension === ACTION_DIM) {
-    return db
+    return ctx.db
       .query("requests")
       .withIndex("actionName", (q) => q.eq("actionName", value))
       .paginate(options);
   }
-  const tags = await db
+  const tags = await ctx.db
     .query("requestTags")
     .withIndex("dim_value", (q) =>
       q.eq("dimension", dimension).eq("value", value),
@@ -2463,9 +2460,19 @@ async function attributedRequests(
 }
 
 export const reconcileBucket = internalMutation({
-  args: { bucketId: v.id("buckets"), cursor: v.union(v.string(), v.null()) },
+  args: {
+    bucketId: v.id("buckets"),
+    cursor: v.union(v.string(), v.null()),
+    // True when `cursor` is a built-in .paginate() cursor. Jobs scheduled
+    // before the switch from convex-helpers' paginator lack it; their cursors
+    // aren't valid built-in cursors, so they restart the scan from the start
+    // (safe: already-folded and already-held requests are skipped).
+    builtInCursor: v.optional(v.boolean()),
+  },
   returns: v.null(),
-  handler: async (ctx, { bucketId, cursor }) => {
+  handler: async (ctx, args) => {
+    const { bucketId } = args;
+    const cursor = args.builtInCursor ? args.cursor : null;
     const initial = await ctx.db.get("buckets", bucketId);
     if (!initial) return null;
     const policy = await ctx.db
@@ -2486,6 +2493,7 @@ export const reconcileBucket = internalMutation({
       await ctx.scheduler.runAfter(0, internal.lib.reconcileBucket, {
         bucketId,
         cursor,
+        builtInCursor: true,
       });
       return null;
     }
@@ -2559,6 +2567,7 @@ export const reconcileBucket = internalMutation({
       await ctx.scheduler.runAfter(0, internal.lib.reconcileBucket, {
         bucketId,
         cursor: page.continueCursor,
+        builtInCursor: true,
       });
     } else
       await ctx.db.patch("bucketPolicies", policy._id, { reconciling: false });
