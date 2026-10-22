@@ -96,7 +96,7 @@
     "ai": "^7.0.108",
     "chokidar-cli": "3.0.0",
     "convex": "1.46.0",
-    "convex-test": "https://pkg.pr.new/convex/convex-test@163",
+    "convex-test": "0.0.64",
     "eslint": "10.12.0",
     "globals": "^17.13.0",
     "react": "^19.0.0",

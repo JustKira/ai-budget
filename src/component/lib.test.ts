@@ -365,7 +365,9 @@ describe("per-bucket rate limits", () => {
       expect(
         (await start(t, { userId: "u", actionName: "free" })).allowed,
       ).toBe(false);
-      vi.advanceTimersByTime(30_000);
+      // Slightly past the refill: Date.now() is pinned per mutation and can
+      // run a few ms ahead of the fake clock.
+      vi.advanceTimersByTime(31_000);
       expect(
         (await start(t, { userId: "u", actionName: "free" })).allowed,
       ).toBe(true);
@@ -386,7 +388,9 @@ describe("per-bucket rate limits", () => {
       expect((await start(t, { userId: "u" })).allowed).toBe(true);
       await setUserLimits(t, "u", { requestsPerMinute: 4 });
       expect((await start(t, { userId: "u" })).allowed).toBe(false);
-      vi.advanceTimersByTime(15_000);
+      // Slightly past the refill: Date.now() is pinned per mutation and can
+      // run a few ms ahead of the fake clock.
+      vi.advanceTimersByTime(16_000);
       expect((await start(t, { userId: "u" })).allowed).toBe(true);
       vi.advanceTimersByTime(60_000);
       await setUserLimits(t, "u", { requestsPerMinute: 1 });

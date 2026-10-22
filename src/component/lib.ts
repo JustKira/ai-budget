@@ -2460,19 +2460,9 @@ async function attributedRequests(
 }
 
 export const reconcileBucket = internalMutation({
-  args: {
-    bucketId: v.id("buckets"),
-    cursor: v.union(v.string(), v.null()),
-    // True when `cursor` is a built-in .paginate() cursor. Jobs scheduled
-    // before the switch from convex-helpers' paginator lack it; their cursors
-    // aren't valid built-in cursors, so they restart the scan from the start
-    // (safe: already-folded and already-held requests are skipped).
-    builtInCursor: v.optional(v.boolean()),
-  },
+  args: { bucketId: v.id("buckets"), cursor: v.union(v.string(), v.null()) },
   returns: v.null(),
-  handler: async (ctx, args) => {
-    const { bucketId } = args;
-    const cursor = args.builtInCursor ? args.cursor : null;
+  handler: async (ctx, { bucketId, cursor }) => {
     const initial = await ctx.db.get("buckets", bucketId);
     if (!initial) return null;
     const policy = await ctx.db
@@ -2493,7 +2483,6 @@ export const reconcileBucket = internalMutation({
       await ctx.scheduler.runAfter(0, internal.lib.reconcileBucket, {
         bucketId,
         cursor,
-        builtInCursor: true,
       });
       return null;
     }
@@ -2567,7 +2556,6 @@ export const reconcileBucket = internalMutation({
       await ctx.scheduler.runAfter(0, internal.lib.reconcileBucket, {
         bucketId,
         cursor: page.continueCursor,
-        builtInCursor: true,
       });
     } else
       await ctx.db.patch("bucketPolicies", policy._id, { reconciling: false });
