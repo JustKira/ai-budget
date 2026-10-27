@@ -412,6 +412,24 @@ Occurrence time selects UTC day/month history, matching live calendar counters,
 and global daily spend. Late charges still increase lifetime spend. Existing
 calls omit the new optional record fields and use `finishedAt` as before.
 
+### Cost-only settlement revisions
+
+Use `settle(ctx, { requestId, revise: true, costNanos })` to replace a settled
+charge's cost. It requires an explicit nonnegative integer cost, preserving the
+original occurrence time, buckets, tokens, content, status and request count.
+An optional `occurredAt` must equal the original time. Other settlement fields
+are rejected. Ordinary duplicate settlement remains a no-op.
+
+Folding applies the difference from the last durable billing event to the
+original calendar windows and global counters, including when rollups are queued.
+A reduction changes gross spend rather than creating manual credits. Repeating
+the same amount is a no-op. Concurrent different revisions use transaction order
+(last committed cost wins); callers must fence stale provider corrections.
+
+Explicit revisions also work after actual request-log retention using the durable
+billing event. Deleted bucket generations are skipped. That event stores the
+current authoritative cost in place; it is not an append-only revision audit log.
+
 ### Request rate limits
 
 `requestsPerMinute` uses `@convex-dev/rate-limiter` 0.4.0 with a transactional
@@ -971,7 +989,8 @@ external execution guarantee.
   reactively on the minute cron, including for otherwise idle buckets.
 - `ai.requests.billing(ctx, { requestId })` reads the durable billing event even
   after its prompt log is retained then removed. `costSource` distinguishes
-  authoritative charges, token estimates, and reservation estimates. New events
+  authoritative charges, token estimates, and reservation estimates. Cost revisions
+  update this record in place and preserve its occurrence time. New events
   are inserted atomically with folding and contain no prompt text or user keys.
 - `ai.global.audit(ctx, { cursor, limit })` pages admin changes. Client wrappers
   derive actors from authentication; trusted host calls without identity record

@@ -322,11 +322,21 @@ test("meter forwards occurrence-time defaults and result overrides", async () =>
 
 test("N2: settlement timestamp tooltip includes the admission default", () => {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-  const settleArgs = source.slice(
-    source.indexOf("  async settle("),
-    source.indexOf("  ): Promise<{ costNanos: number }>"),
-  );
-  expect(settleArgs).toContain(
+  expect(source).toContain(
     "explicit settle/result override, then begin default, then processing time",
   );
+});
+
+test("cost-only settlement revisions pass through unchanged", async () => {
+  const ctx = makeCtx();
+  await new AIBudget(component).settle(ctx as any, {
+    requestId: "r",
+    costNanos: 20,
+    revise: true,
+  });
+  expect(ctx.runMutation.mock.calls[0][1]).toEqual({
+    requestId: "r",
+    costNanos: 20,
+    revise: true,
+  });
 });

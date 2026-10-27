@@ -86,6 +86,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           promptTokens?: number;
           requestId: string;
           responseText?: string;
+          revise?: boolean;
           serverToolUses?: Record<string, number>;
         },
         { costNanos: number },
@@ -241,6 +242,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           reservationReleased?: boolean;
           reserveTtlMs?: number;
           responseText?: string;
+          revisionPending?: boolean;
           serverToolPriceSnapshot?: Record<string, number>;
           serverToolUses?: Record<string, number>;
           settled?: boolean;
@@ -301,6 +303,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             reservationReleased?: boolean;
             reserveTtlMs?: number;
             responseText?: string;
+            revisionPending?: boolean;
             serverToolPriceSnapshot?: Record<string, number>;
             serverToolUses?: Record<string, number>;
             settled?: boolean;
@@ -354,6 +357,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             reservationReleased?: boolean;
             reserveTtlMs?: number;
             responseText?: string;
+            revisionPending?: boolean;
             serverToolPriceSnapshot?: Record<string, number>;
             serverToolUses?: Record<string, number>;
             settled?: boolean;
@@ -493,6 +497,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           reservationMonth?: string;
           reservationReleased?: boolean;
           reserveTtlMs?: number;
+          revisionPending?: boolean;
           serverToolPriceSnapshot?: Record<string, number>;
           serverToolUses?: Record<string, number>;
           settled?: boolean;

@@ -243,6 +243,8 @@ export default defineSchema({
     // false once finished and awaiting fold into totals; true once folded.
     // absent while pending or blocked (so the reconciler ignores those).
     settled: v.optional(v.boolean()),
+    // Only explicit revisions need to read the previous durable charge.
+    revisionPending: v.optional(v.boolean()),
     messages: v.array(vMessage),
     status: v.union(
       v.literal("pending"),

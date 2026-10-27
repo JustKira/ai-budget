@@ -10,7 +10,7 @@ export default defineConfig({
     // checkout (i.e. release CI) can't resolve its `./_generated` imports.
     include: ["src/**/*.test.ts"],
     typecheck: {
-      tsconfig: "./tsconfig.test.json",
+      tsconfig: "./tsconfig.type-tests.json",
     },
   },
 });

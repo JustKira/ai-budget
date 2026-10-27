@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add cost-only settlement revisions in the original windows, including after
+  request-log retention.
+
 - Accept validated occurrence-time attribution on `begin`, `meter`, and `settle`.
 
 ## 1.1.2

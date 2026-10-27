@@ -331,6 +331,32 @@ function validateReservation(reservation: StrictReservation) {
   }
 }
 
+type SettlementUsage = {
+  responseText?: string;
+  error?: string;
+  usage?: any;
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedTokens?: number;
+  cachedWriteTokens?: number;
+  cachedWrite1hTokens?: number;
+  serverToolUses?: Record<string, number>;
+  costNanos?: number;
+  latencyMs?: number;
+};
+
+/** Ordinary completion, or an explicit cost-only replacement. */
+export type SettlementArgs = {
+  requestId: string;
+  /** Billing time: explicit settle/result override, then begin default, then processing time. */
+  occurredAt?: number;
+} & (
+  | ({ revise?: false } & SettlementUsage)
+  | ({ revise: true; costNanos: number } & {
+      [K in Exclude<keyof SettlementUsage, "costNanos">]?: never;
+    })
+);
+
 export class AIBudget {
   public defaultModel: string;
   public defaultEvalModel: string;
@@ -465,26 +491,12 @@ export class AIBudget {
    * Record the actual usage/cost of a `begin`-reserved request and release its
    * reservation. Idempotent (exactly-once server-side). Pass a raw provider
    * `usage` (auto-normalized) or explicit token counts, plus optional
-   * `serverToolUses` and an authoritative `costNanos`.
+   * `serverToolUses` and an authoritative `costNanos`. With `revise: true`,
+   * replace only the cost in the original billing windows.
    */
   async settle(
     ctx: MutationCtx | ActionCtx,
-    args: {
-      requestId: string;
-      /** Billing time: explicit settle/result override, then begin default, then processing time. */
-      occurredAt?: number;
-      responseText?: string;
-      error?: string;
-      usage?: any;
-      promptTokens?: number;
-      completionTokens?: number;
-      cachedTokens?: number;
-      cachedWriteTokens?: number;
-      cachedWrite1hTokens?: number;
-      serverToolUses?: Record<string, number>;
-      costNanos?: number;
-      latencyMs?: number;
-    },
+    args: SettlementArgs,
   ): Promise<{ costNanos: number }> {
     const {
       requestId,

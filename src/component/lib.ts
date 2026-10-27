@@ -1351,9 +1351,38 @@ export const startRequest = mutation({
   },
 });
 
+function revisionCost(
+  args: {
+    requestId: unknown;
+    costNanos?: number;
+    revise?: boolean;
+    occurredAt?: number;
+  },
+  occurredAt: number,
+) {
+  assertAmount(args.costNanos, "costNanos");
+  if (args.costNanos === undefined)
+    throw new Error("A revision requires costNanos");
+  if (args.occurredAt !== undefined && args.occurredAt !== occurredAt)
+    throw new Error("A revision cannot change attribution time");
+  const {
+    requestId: _id,
+    costNanos,
+    revise: _revise,
+    occurredAt: _at,
+    ...rest
+  } = args;
+  if (Object.values(rest).some((value) => value !== undefined))
+    throw new Error(
+      "A revision accepts only costNanos and the original attribution time",
+    );
+  return costNanos;
+}
+
 export const finishRequest = mutation({
   args: {
     occurredAt: v.optional(v.number()),
+    revise: v.optional(v.boolean()),
     requestId: v.id("requests"),
     responseText: v.optional(v.string()),
     error: v.optional(v.string()),
@@ -1375,15 +1404,45 @@ export const finishRequest = mutation({
   returns: v.object({ costNanos: v.number() }),
   handler: async (ctx, args) => {
     const request = await ctx.db.get("requests", args.requestId);
-    // The request may be gone — retention purged it, or the owning bucket was
-    // deleted. A late/duplicate webhook must be an idempotent no-op, not a 500
-    // (the caller can't do anything useful with the error, and it triggers retries).
+    // Ordinary late/duplicate webhooks remain no-ops after retention. Explicit
+    // revisions can still replace a charge using the durable billing record.
     if (!request) {
       const event = await ctx.db
         .query("billingEvents")
         .withIndex("requestId", (q) => q.eq("requestId", args.requestId))
         .unique();
+      if (args.revise) {
+        if (!event)
+          throw new Error("No settled billing record exists for this request");
+        const costNanos = revisionCost(
+          args,
+          event.occurredAt ?? event.finishedAt,
+        );
+        await reviseBillingEvent(ctx, event, costNanos);
+        return { costNanos };
+      }
       return { costNanos: event?.costNanos ?? 0 };
+    }
+
+    if (args.revise) {
+      if (request.finishedAt === undefined || request.status === "blocked")
+        throw new Error("Only a settled request can be revised");
+      // Cost-only revisions preserve usage, content and completion status.
+      const costNanos = revisionCost(
+        args,
+        request.occurredAt ?? request.finishedAt,
+      );
+      if (request.costNanos === costNanos) return { costNanos };
+      await ctx.db.patch("requests", request._id, {
+        costNanos,
+        costSource: "authoritative",
+        settled: false,
+        revisionPending: true,
+      });
+      await ctx.scheduler.runAfter(0, internal.lib.foldTotals, {
+        requestId: request._id,
+      });
+      return { costNanos };
     }
 
     // Expiry releases capacity, but is not evidence that the provider charged
@@ -1567,16 +1626,130 @@ async function releaseReservation(ctx: MutationCtx, req: Doc<"requests">) {
   );
 }
 
-// Final billing is folded once. Reservation release has its own guard because
-// expiry can precede the final charge by hours or days.
+// Apply one charge delta through the existing live-cap / async-rollup path.
+// Negative deltas replace prior spend; they never create manual credits.
+async function addCharge(
+  ctx: MutationCtx,
+  t: { dimension: string; value: string },
+  bNow: Doc<"buckets"> | null,
+  actual: number,
+  tokens: number,
+  requests: number,
+  day: string,
+  month: string,
+) {
+  // Capped buckets need their row updated LIVE so the next admission sees the
+  // spend (enforcement can't wait for the async rollup). They're per-user /
+  // low-concurrency, so the row isn't a hot contention point. Uncapped buckets
+  // (the shared action/tag rows) get NO write here — only an append-only delta
+  // the reconciler drains — so a hot shared dimension never serializes settles.
+  const capped = await bucketIsCapped(ctx, t.dimension, t.value);
+  if (capped) {
+    const b = bNow;
+    if (b) {
+      const targetDay = b.dayStamp > day ? b.dayStamp : day;
+      const targetMonth = (b.monthStamp ?? "") > month ? b.monthStamp! : month;
+      await ctx.db.patch(
+        "buckets",
+        b._id,
+        checkedAccounting(
+          {
+            totalSpendNanos: b.totalSpendNanos + actual,
+            totalRequests: b.totalRequests + requests,
+            totalTokens: b.totalTokens + tokens,
+            ...windowResets(b, targetDay, targetMonth),
+            dayStamp: targetDay,
+            monthStamp: targetMonth,
+            spendTodayNanos:
+              (b.dayStamp === targetDay ? b.spendTodayNanos : 0) +
+              (day === targetDay ? actual : 0),
+            tokensToday:
+              (b.dayStamp === targetDay ? (b.tokensToday ?? 0) : 0) +
+              (day === targetDay ? tokens : 0),
+            spendThisMonthNanos:
+              (b.monthStamp === targetMonth
+                ? (b.spendThisMonthNanos ?? 0)
+                : 0) + (month === targetMonth ? actual : 0),
+            tokensThisMonth:
+              (b.monthStamp === targetMonth ? (b.tokensThisMonth ?? 0) : 0) +
+              (month === targetMonth ? tokens : 0),
+            ...(b.dayStamp !== targetDay
+              ? { reservedTodayNanos: 0, reservedTodayTokens: 0 }
+              : {}),
+            ...(b.monthStamp !== targetMonth
+              ? { reservedMonthNanos: 0, reservedMonthTokens: 0 }
+              : {}),
+            // settle hot path: saturate on overflow, never throw (see checkedAccounting)
+          },
+          { saturate: true },
+        ),
+      );
+    }
+  }
+  // Append-only delta: rollupPhase folds it into `usage` (history, all buckets)
+  // and, when uncapped, into the bucket-row totals.
+  await ctx.db.insert("usageDeltas", {
+    dimension: t.dimension,
+    value: t.value,
+    day,
+    month,
+    spendNanos: actual,
+    tokens,
+    requests,
+    drainToRow: !capped,
+    ...(bNow ? { bucketId: bNow._id } : {}),
+  });
+}
+
+// After prompt retention, the billing record still owns opaque bucket/window
+// references. Reading and replacing that record serializes competing revisions.
+async function reviseBillingEvent(
+  ctx: MutationCtx,
+  event: Doc<"billingEvents">,
+  costNanos: number,
+) {
+  const delta = costNanos - event.costNanos;
+  if (delta === 0) return;
+  const timestamp = new Date(
+    event.occurredAt ?? event.finishedAt,
+  ).toISOString();
+  const day = timestamp.slice(0, 10),
+    month = timestamp.slice(0, 7);
+  const buckets = await Promise.all(
+    event.bucketIds.map((id) => ctx.db.get("buckets", id)),
+  );
+  for (const b of buckets) {
+    // A deleted bucket generation is never recreated by a correction.
+    if (!b || (await deletionOf(ctx, b.dimension, b.value))?.deleting) continue;
+    await addCharge(ctx, b, b, delta, 0, 0, day, month);
+  }
+  await globalSpend.add(ctx, GLOBAL_TOTAL, delta);
+  await globalSpend.add(ctx, globalDayKey(day), delta);
+  await ctx.db.patch("billingEvents", event._id, {
+    costNanos,
+    costSource: "authoritative",
+  });
+}
+
+// Fold the difference from the last durable billing event. The request row
+// serializes revisions with folding; queued identical revisions are no-ops.
+// Reservation release has its own guard because expiry can precede billing.
 async function foldOne(ctx: MutationCtx, req: Doc<"requests"> | null) {
   if (!req || req.settled !== false) return;
   await releaseReservation(ctx, req);
-  const actual = req.costNanos ?? 0;
-  const tokens = (req.promptTokens ?? 0) + (req.completionTokens ?? 0);
-  const timestamp = new Date(
-    req.occurredAt ?? req.finishedAt ?? Date.now(),
-  ).toISOString();
+  const event = req.revisionPending
+    ? await ctx.db
+        .query("billingEvents")
+        .withIndex("requestId", (q) => q.eq("requestId", req._id))
+        .unique()
+    : null;
+  const actual = (req.costNanos ?? 0) - (event?.costNanos ?? 0);
+  const tokens = event
+    ? 0
+    : (req.promptTokens ?? 0) + (req.completionTokens ?? 0);
+  const requests = event ? 0 : 1;
+  const occurredAt = req.occurredAt ?? req.finishedAt ?? Date.now();
+  const timestamp = new Date(occurredAt).toISOString();
   const day = timestamp.slice(0, 10);
   const month = timestamp.slice(0, 7);
   for (const t of requestBuckets(req.userId, req.actionName, req.tags)) {
@@ -1592,84 +1765,36 @@ async function foldOne(ctx: MutationCtx, req: Doc<"requests"> | null) {
         : deletion && req._creationTime <= deletion._creationTime
     )
       continue;
-    // Capped buckets need their row updated LIVE so the next admission sees the
-    // spend (enforcement can't wait for the async rollup). They're per-user /
-    // low-concurrency, so the row isn't a hot contention point. Uncapped buckets
-    // (the shared action/tag rows) get NO write here — only an append-only delta
-    // the reconciler drains — so a hot shared dimension never serializes settles.
-    const capped = await bucketIsCapped(ctx, t.dimension, t.value);
-    if (capped) {
-      const b = await getBucketDoc(ctx, t.dimension, t.value);
-      if (b) {
-        const targetDay = b.dayStamp > day ? b.dayStamp : day;
-        const targetMonth =
-          (b.monthStamp ?? "") > month ? b.monthStamp! : month;
-        await ctx.db.patch(
-          "buckets",
-          b._id,
-          checkedAccounting(
-            {
-              totalSpendNanos: b.totalSpendNanos + actual,
-              totalRequests: b.totalRequests + 1,
-              totalTokens: b.totalTokens + tokens,
-              ...windowResets(b, targetDay, targetMonth),
-              dayStamp: targetDay,
-              monthStamp: targetMonth,
-              spendTodayNanos:
-                (b.dayStamp === targetDay ? b.spendTodayNanos : 0) +
-                (day === targetDay ? actual : 0),
-              tokensToday:
-                (b.dayStamp === targetDay ? (b.tokensToday ?? 0) : 0) +
-                (day === targetDay ? tokens : 0),
-              spendThisMonthNanos:
-                (b.monthStamp === targetMonth
-                  ? (b.spendThisMonthNanos ?? 0)
-                  : 0) + (month === targetMonth ? actual : 0),
-              tokensThisMonth:
-                (b.monthStamp === targetMonth ? (b.tokensThisMonth ?? 0) : 0) +
-                (month === targetMonth ? tokens : 0),
-              ...(b.dayStamp !== targetDay
-                ? { reservedTodayNanos: 0, reservedTodayTokens: 0 }
-                : {}),
-              ...(b.monthStamp !== targetMonth
-                ? { reservedMonthNanos: 0, reservedMonthTokens: 0 }
-                : {}),
-              // settle hot path: saturate on overflow, never throw (see checkedAccounting)
-            },
-            { saturate: true },
-          ),
-        );
-      }
-    }
-    // Append-only delta: rollupPhase folds it into `usage` (history, all buckets)
-    // and, when uncapped, into the bucket-row totals.
-    await ctx.db.insert("usageDeltas", {
-      dimension: t.dimension,
-      value: t.value,
-      day,
-      month,
-      spendNanos: actual,
-      tokens,
-      requests: 1,
-      drainToRow: !capped,
-      ...(bNow ? { bucketId: bNow._id } : {}),
-    });
+    await addCharge(ctx, t, bNow, actual, tokens, requests, day, month);
   }
-  await ctx.db.insert("billingEvents", {
-    requestId: req._id,
-    costNanos: actual,
-    costSource: req.costSource,
-    tokens,
-    finishedAt: req.finishedAt ?? Date.now(),
-    ...(req.occurredAt !== undefined ? { occurredAt: req.occurredAt } : {}),
-    bucketIds: req.attributedBuckets?.map((t) => t.bucketId) ?? [],
-  });
+  if (event) {
+    await ctx.db.patch("billingEvents", event._id, {
+      costNanos: req.costNanos ?? 0,
+      costSource: req.costSource,
+    });
+  } else
+    await ctx.db.insert("billingEvents", {
+      requestId: req._id,
+      costNanos: req.costNanos ?? 0,
+      costSource: req.costSource,
+      tokens,
+      finishedAt: req.finishedAt ?? Date.now(),
+      ...(req.occurredAt !== undefined ? { occurredAt: req.occurredAt } : {}),
+      bucketIds: req.attributedBuckets?.map((t) => t.bucketId) ?? [],
+    });
   // Reporting is independent of whether enforcement is configured.
-  if (actual > 0) {
+  if (actual !== 0) {
     await globalSpend.add(ctx, GLOBAL_TOTAL, actual);
     await globalSpend.add(ctx, globalDayKey(day), actual);
   }
-  await ctx.db.patch("requests", req._id, checkedAccounting({ settled: true }));
+  await ctx.db.patch(
+    "requests",
+    req._id,
+    checkedAccounting({
+      settled: true,
+      ...(req.revisionPending ? { revisionPending: undefined } : {}),
+    }),
+  );
 }
 
 export const foldTotals = internalMutation({
