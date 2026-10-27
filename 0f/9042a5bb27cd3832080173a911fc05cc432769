@@ -1,0 +1,41 @@
+CHANGELOG.md
+  s_9b1ecd85c3f4ed::t_719f08434aafcd 5-7
+README.md
+  s_9b1ecd85c3f4ed::t_1fcc56a6461ebe 415-432,992-993
+src/client/index.ts
+  s_9b1ecd85c3f4ed::t_7dd36666c207c2 334-359,494-495,499
+src/client/security.test.ts
+  s_9b1ecd85c3f4ed::t_5a096309efb010 325,329-342
+src/client/settlement.test-d.ts
+  s_9b1ecd85c3f4ed::t_b41ca3623be94e 1-32
+src/component/_generated/component.ts
+  s_9b1ecd85c3f4ed::t_f47e733af4b6b7 89,245,306,360,500
+src/component/lib.ts
+  s_9b1ecd85c3f4ed::t_ba794141dc8f45 1354-1381,1385,1407-1408,1414-1423,1427-1447,1629-1736,1740-1752,1768-1779,1781-1783,1786,1790-1797
+src/component/revisions.test.ts
+  s_9b1ecd85c3f4ed::t_c10f4e9198c705 1-235
+src/component/schema.ts
+  s_9b1ecd85c3f4ed::t_024dd1f8a2c86a 246-247
+tsconfig.build.json
+  s_9b1ecd85c3f4ed::t_aecb806b87c61c 4
+tsconfig.type-tests.json
+  s_9b1ecd85c3f4ed::t_ba7220eb08c2d8 1-6
+vitest.config.ts
+  s_9b1ecd85c3f4ed::t_1257dd00ab97ec 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0f9042a5bb27cd3832080173a911fc05cc432769",
+  "prompts": {},
+  "sessions": {
+    "s_9b1ecd85c3f4ed": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17de3-1590-77a3-bcad-dac4a06a45f1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
