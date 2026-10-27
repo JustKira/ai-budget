@@ -340,3 +340,18 @@ test("cost-only settlement revisions pass through unchanged", async () => {
     revise: true,
   });
 });
+
+test("subscription limits pass through the user, action and tag namespaces", async () => {
+  const ctx = makeCtx();
+  const ai = new AIBudget(component);
+  const limits = {
+    period: { start: 1000, end: 2000 },
+    periodSpendLimitNanos: 300,
+    periodTokenLimit: 700,
+  };
+  await ai.users.setLimits(ctx as any, { userId: "u", ...limits });
+  await ai.actions.setLimits(ctx as any, { name: "job", ...limits });
+  await ai.tag("team").setLimits(ctx as any, { value: "a", ...limits });
+  for (const [, args] of ctx.runMutation.mock.calls)
+    expect(args).toMatchObject(limits);
+});

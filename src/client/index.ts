@@ -296,6 +296,10 @@ export type BucketLimits = {
   dailyTokenLimit?: number | null;
   monthlyTokenLimit?: number | null;
   lifetimeTokenLimit?: number | null;
+  /** App-managed half-open range; setting a later range starts a fresh allowance. */
+  period?: { start: number; end: number };
+  periodSpendLimitNanos?: number | null;
+  periodTokenLimit?: number | null;
   /** Fire an approaching-limit alert at this fraction of a cap (e.g. 0.8). */
   warnAtPct?: number | null;
   enforcement?: "hard" | "soft" | null;
@@ -1148,10 +1152,10 @@ export class AIBudget {
           tokens: args.tokens,
           reason: args.reason,
         }),
-      /** Durable spend history for this bucket (per day or per month). */
+      /** Durable spend history for calendar or app-managed periods. */
       history: (
         ctx: QueryCtx | MutationCtx | ActionCtx,
-        args: A & { period?: "day" | "month"; limit?: number },
+        args: A & { period?: "day" | "month" | "period"; limit?: number },
       ) =>
         ctx.runQuery(c.lib.usageHistory, {
           dimension,

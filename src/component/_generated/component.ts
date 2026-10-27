@@ -99,6 +99,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           _creationTime: number;
           _id: string;
+          attributedPeriods?: Array<string>;
           bucketIds: Array<string>;
           costNanos: number;
           costSource?:
@@ -123,6 +124,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           creditsNanos?: number;
           creditsThisMonthNanos?: number;
           creditsTodayNanos?: number;
+          currentPeriodId?: string;
           dailyBumpNanos?: number;
           dailySpendLimitNanos?: number;
           dailyTokenLimit?: number;
@@ -138,6 +140,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           monthlySpendLimitNanos?: number;
           monthlyTokenLimit?: number;
           pendingCount?: number;
+          period?: { end: number; start: number };
+          periodSpendLimitNanos?: number;
+          periodTokenLimit?: number;
           requestsPerMinute?: number;
           reservedMonthNanos?: number;
           reservedMonthTokens?: number;
@@ -206,6 +211,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             dimension: string;
             value: string;
           }>;
+          attributedPeriods?: Array<string>;
           cachedTokens?: number;
           cachedWrite1hTokens?: number;
           cachedWriteTokens?: number;
@@ -239,6 +245,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           reservationDay?: string;
           reservationExpired?: boolean;
           reservationMonth?: string;
+          reservationPeriods?: Array<{ bucketId: string; periodId: string }>;
           reservationReleased?: boolean;
           reserveTtlMs?: number;
           responseText?: string;
@@ -267,6 +274,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               dimension: string;
               value: string;
             }>;
+            attributedPeriods?: Array<string>;
             cachedTokens?: number;
             cachedWrite1hTokens?: number;
             cachedWriteTokens?: number;
@@ -300,6 +308,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             reservationDay?: string;
             reservationExpired?: boolean;
             reservationMonth?: string;
+            reservationPeriods?: Array<{ bucketId: string; periodId: string }>;
             reservationReleased?: boolean;
             reserveTtlMs?: number;
             responseText?: string;
@@ -321,6 +330,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               dimension: string;
               value: string;
             }>;
+            attributedPeriods?: Array<string>;
             cachedTokens?: number;
             cachedWrite1hTokens?: number;
             cachedWriteTokens?: number;
@@ -354,6 +364,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             reservationDay?: string;
             reservationExpired?: boolean;
             reservationMonth?: string;
+            reservationPeriods?: Array<{ bucketId: string; periodId: string }>;
             reservationReleased?: boolean;
             reserveTtlMs?: number;
             responseText?: string;
@@ -398,6 +409,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           creditsNanos?: number;
           creditsThisMonthNanos?: number;
           creditsTodayNanos?: number;
+          currentPeriodId?: string;
           dailyBumpNanos?: number;
           dailySpendLimitNanos?: number;
           dailyTokenLimit?: number;
@@ -413,6 +425,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           monthlySpendLimitNanos?: number;
           monthlyTokenLimit?: number;
           pendingCount?: number;
+          period?: { end: number; start: number };
+          periodSpendLimitNanos?: number;
+          periodTokenLimit?: number;
           requestsPerMinute?: number;
           reservedMonthNanos?: number;
           reservedMonthTokens?: number;
@@ -462,6 +477,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             dimension: string;
             value: string;
           }>;
+          attributedPeriods?: Array<string>;
           cachedTokens?: number;
           cachedWrite1hTokens?: number;
           cachedWriteTokens?: number;
@@ -495,6 +511,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           reservationDay?: string;
           reservationExpired?: boolean;
           reservationMonth?: string;
+          reservationPeriods?: Array<{ bucketId: string; periodId: string }>;
           reservationReleased?: boolean;
           reserveTtlMs?: number;
           revisionPending?: boolean;
@@ -571,6 +588,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             creditsNanos?: number;
             creditsThisMonthNanos?: number;
             creditsTodayNanos?: number;
+            currentPeriodId?: string;
             dailyBumpNanos?: number;
             dailySpendLimitNanos?: number;
             dailyTokenLimit?: number;
@@ -586,6 +604,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             monthlySpendLimitNanos?: number;
             monthlyTokenLimit?: number;
             pendingCount?: number;
+            period?: { end: number; start: number };
+            periodSpendLimitNanos?: number;
+            periodTokenLimit?: number;
             requestsPerMinute?: number;
             reservedMonthNanos?: number;
             reservedMonthTokens?: number;
@@ -630,6 +651,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           maxConcurrent?: number | null;
           monthlySpendLimitNanos?: number | null;
           monthlyTokenLimit?: number | null;
+          period?: { end: number; start: number };
+          periodSpendLimitNanos?: number | null;
+          periodTokenLimit?: number | null;
           requestsPerMinute?: number | null;
           value: string;
           warnAtPct?: number | null;
@@ -735,15 +759,20 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           dimension: string;
           limit?: number;
-          period: "day" | "month";
+          period: "day" | "month" | "period";
           value: string;
         },
         Array<{
           _creationTime: number;
           _id: string;
+          creditsNanos?: number;
           dimension: string;
-          period: "day" | "month";
+          period: "day" | "month" | "period";
+          periodEnd?: number;
+          periodStart?: number;
           requests: number;
+          reservedNanos?: number;
+          reservedTokens?: number;
           spendNanos: number;
           stamp: string;
           tokens: number;

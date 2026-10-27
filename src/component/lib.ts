@@ -482,6 +482,45 @@ async function addUsage(
   }
 }
 
+// Ranges are immutable and non-overlapping, so the latest start at or before
+// occurrence time is the only possible match. Gaps intentionally have no period.
+async function periodAt(
+  ctx: MutationCtx,
+  b: Doc<"buckets">,
+  occurredAt: number,
+) {
+  const row = await ctx.db
+    .query("usage")
+    .withIndex("bucket_period_start", (q) =>
+      q
+        .eq("dimension", b.dimension)
+        .eq("value", b.value)
+        .eq("period", "period")
+        .lte("periodStart", occurredAt),
+    )
+    .order("desc")
+    .first();
+  return row && occurredAt < row.periodEnd! ? row : null;
+}
+
+async function reservePeriod(
+  ctx: MutationCtx,
+  periodId: Doc<"usage">["_id"],
+  cost: number,
+  tokens: number,
+) {
+  const row = await ctx.db.get("usage", periodId);
+  if (!row) return;
+  await ctx.db.patch(
+    "usage",
+    row._id,
+    checkedAccounting({
+      reservedNanos: Math.max(0, (row.reservedNanos ?? 0) + cost),
+      reservedTokens: Math.max(0, (row.reservedTokens ?? 0) + tokens),
+    }),
+  );
+}
+
 // Up-front estimate of a request's cost and token count, reserved before the
 // call so concurrent in-flight requests are visible to each other's caps.
 function estimateUsage(
@@ -547,8 +586,8 @@ function sanitizeExtraTags(
 
 // Evaluate a bucket's spend + token budgets against committed + reserved + this
 // request's estimate. Returns a hard rejection (block), soft warnings (allow),
-// and threshold notices (approaching a cap — see warnAtPct). Each window (daily,
-// monthly, lifetime) × kind (spend, token) is one check.
+// and threshold notices (approaching a cap — see warnAtPct). Each calendar,
+// anchored or lifetime window × kind (spend, token) is one check.
 const projected = (...amounts: number[]) =>
   amounts.reduce((sum, amount) => {
     assertAmount(amount, "budget usage", { signed: true });
@@ -579,12 +618,19 @@ function evaluateCaps(o: {
   reservedTokensMonth: number;
   totalTokens: number;
   reservedTokensTotal: number;
+  periodSpend?: number;
+  periodCredits?: number;
+  periodReservedSpend?: number;
+  periodTokens?: number;
+  periodReservedTokens?: number;
   dailySpendLimitNanos?: number;
   monthlySpendLimitNanos?: number;
   lifetimeSpendLimitNanos?: number;
   dailyTokenLimit?: number;
   monthlyTokenLimit?: number;
   lifetimeTokenLimit?: number;
+  periodSpendLimitNanos?: number;
+  periodTokenLimit?: number;
 }): {
   hard?: { code: string; reason: string };
   warnings: string[];
@@ -593,6 +639,29 @@ function evaluateCaps(o: {
   // { code, projected usage (incl. this estimate), cap, human window label,
   //   whether it's a money cap (formatted as $), spend? for notices }
   const checks = [
+    {
+      w: "period_spend_limit",
+      used: projected(
+        o.periodSpend ?? 0,
+        o.periodReservedSpend ?? 0,
+        o.estCost,
+        -(o.periodCredits ?? 0),
+      ),
+      cap: o.periodSpendLimitNanos,
+      label: "period spend limit",
+      money: true,
+    },
+    {
+      w: "period_token_limit",
+      used: projected(
+        o.periodTokens ?? 0,
+        o.periodReservedTokens ?? 0,
+        o.estTokens,
+      ),
+      cap: o.periodTokenLimit,
+      label: "period token limit",
+      money: false,
+    },
     {
       w: "daily_spend_limit",
       used: projected(
@@ -700,13 +769,17 @@ const hasAnyCap = (e: {
   dailyTokenLimit?: number;
   monthlyTokenLimit?: number;
   lifetimeTokenLimit?: number;
+  periodSpendLimitNanos?: number;
+  periodTokenLimit?: number;
 }) =>
   e.dailySpendLimitNanos !== undefined ||
   e.monthlySpendLimitNanos !== undefined ||
   e.lifetimeSpendLimitNanos !== undefined ||
   e.dailyTokenLimit !== undefined ||
   e.monthlyTokenLimit !== undefined ||
-  e.lifetimeTokenLimit !== undefined;
+  e.lifetimeTokenLimit !== undefined ||
+  e.periodSpendLimitNanos !== undefined ||
+  e.periodTokenLimit !== undefined;
 
 // A bucket needs a reservation row-write if it has any spend/token cap OR a
 // concurrency cap (which reads pendingCount, incremented at reserve time).
@@ -786,6 +859,10 @@ async function syncPolicy(ctx: MutationCtx, b: Doc<"buckets">) {
     dailyTokenLimit: b.dailyTokenLimit,
     monthlyTokenLimit: b.monthlyTokenLimit,
     lifetimeTokenLimit: b.lifetimeTokenLimit,
+    periodSpendLimitNanos: b.periodSpendLimitNanos,
+    periodTokenLimit: b.periodTokenLimit,
+    period: b.period,
+    currentPeriodId: b.currentPeriodId,
     blocked: b.blocked,
     warnAtPct: b.warnAtPct,
     enforcement: b.enforcement,
@@ -1165,7 +1242,34 @@ export const startRequest = mutation({
     for (const b of buckets) {
       const sameDay = b.dayStamp === today;
       const sameMonth = b.monthStamp === month;
+      const period =
+        b.currentPeriodId &&
+        (b.periodSpendLimitNanos !== undefined ||
+          b.periodTokenLimit !== undefined)
+          ? await ctx.db.get("usage", b.currentPeriodId)
+          : null;
+      // Admission uses processing time, so backdated work cannot bypass a
+      // stale hard cap. Already-admitted work can still settle into old ranges.
+      if (
+        (b.periodSpendLimitNanos !== undefined ||
+          b.periodTokenLimit !== undefined) &&
+        (!period ||
+          Date.now() < period.periodStart! ||
+          Date.now() >= period.periodEnd!)
+      ) {
+        const reason = `${b.dimension} "${b.value}" has no active selected period; select a range containing the current time`;
+        if ((b.enforcement ?? "hard") === "hard")
+          return reject(`${b.dimension}_period_inactive`, reason, false);
+        warnings.push(reason);
+      }
       const ev = evaluateCaps({
+        periodSpend: period?.spendNanos,
+        periodCredits: period?.creditsNanos,
+        periodReservedSpend: period?.reservedNanos,
+        periodTokens: period?.tokens,
+        periodReservedTokens: period?.reservedTokens,
+        periodSpendLimitNanos: b.periodSpendLimitNanos,
+        periodTokenLimit: b.periodTokenLimit,
         label: b.dimension,
         name: b.value,
         enforcement: b.enforcement ?? "hard",
@@ -1265,6 +1369,8 @@ export const startRequest = mutation({
     // asynchronously, in foldOne — for every bucket, capped or not.
     for (const b of buckets) {
       if (!needsReserve(b)) continue;
+      if (b.currentPeriodId)
+        await reservePeriod(ctx, b.currentPeriodId, est.cost, est.tokens);
       const sameDay = b.dayStamp === today;
       const sameMonth = b.monthStamp === month;
       await ctx.db.patch(
@@ -1306,6 +1412,13 @@ export const startRequest = mutation({
       expiresAt:
         Date.now() + Math.max(STALE_PENDING_MS, args.reserveTtlMs ?? 0),
       occurredAt: args.occurredAt,
+      ...(buckets.some((b) => needsReserve(b) && b.currentPeriodId)
+        ? {
+            reservationPeriods: buckets
+              .filter((b) => needsReserve(b) && b.currentPeriodId)
+              .map((b) => ({ bucketId: b._id, periodId: b.currentPeriodId! })),
+          }
+        : {}),
       heldBucketIds: buckets.filter(needsReserve).map((b) => b._id),
       attributedBuckets: buckets.map((b) => ({
         dimension: b.dimension,
@@ -1575,7 +1688,7 @@ export const finishRequest = mutation({
 });
 
 // Release only holds owned by this request, and only from their original
-// calendar windows. A previous day's completion must not debit today's holds.
+// calendar and anchored windows. Old completions cannot debit newer holds.
 async function releaseReservation(ctx: MutationCtx, req: Doc<"requests">) {
   if (req.reservationReleased) return;
   const day =
@@ -1593,6 +1706,8 @@ async function releaseReservation(ctx: MutationCtx, req: Doc<"requests">) {
         : !needsReserve(b))
     )
       continue;
+    const period = req.reservationPeriods?.find((p) => p.bucketId === b._id);
+    if (period) await reservePeriod(ctx, period.periodId, -cost, -tokens);
     await ctx.db.patch(
       "buckets",
       b._id,
@@ -1722,6 +1837,15 @@ async function reviseBillingEvent(
     // A deleted bucket generation is never recreated by a correction.
     if (!b || (await deletionOf(ctx, b.dimension, b.value))?.deleting) continue;
     await addCharge(ctx, b, b, delta, 0, 0, day, month);
+    for (const id of event.attributedPeriods ?? []) {
+      const period = await ctx.db.get("usage", id);
+      if (period?.dimension === b.dimension && period.value === b.value)
+        await ctx.db.patch(
+          "usage",
+          period._id,
+          checkedAccounting({ spendNanos: period.spendNanos + delta }),
+        );
+    }
   }
   await globalSpend.add(ctx, GLOBAL_TOTAL, delta);
   await globalSpend.add(ctx, globalDayKey(day), delta);
@@ -1750,6 +1874,10 @@ async function foldOne(ctx: MutationCtx, req: Doc<"requests"> | null) {
   const requests = event ? 0 : 1;
   const occurredAt = req.occurredAt ?? req.finishedAt ?? Date.now();
   const timestamp = new Date(occurredAt).toISOString();
+  const attributedPeriods = [...(req.attributedPeriods ?? [])];
+  const originalPeriods = await Promise.all(
+    attributedPeriods.map((id) => ctx.db.get("usage", id)),
+  );
   const day = timestamp.slice(0, 10);
   const month = timestamp.slice(0, 7);
   for (const t of requestBuckets(req.userId, req.actionName, req.tags)) {
@@ -1765,6 +1893,26 @@ async function foldOne(ctx: MutationCtx, req: Doc<"requests"> | null) {
         : deletion && req._creationTime <= deletion._creationTime
     )
       continue;
+    const period = event
+      ? originalPeriods.find(
+          (p) => p?.dimension === t.dimension && p.value === t.value,
+        )
+      : bNow?.currentPeriodId
+        ? await periodAt(ctx, bNow, occurredAt)
+        : null;
+    if (period) {
+      if (!attributedPeriods.includes(period._id))
+        attributedPeriods.push(period._id);
+      await ctx.db.patch(
+        "usage",
+        period._id,
+        checkedAccounting({
+          spendNanos: period.spendNanos + actual,
+          tokens: period.tokens + tokens,
+          requests: period.requests + requests,
+        }),
+      );
+    }
     await addCharge(ctx, t, bNow, actual, tokens, requests, day, month);
   }
   if (event) {
@@ -1780,6 +1928,7 @@ async function foldOne(ctx: MutationCtx, req: Doc<"requests"> | null) {
       tokens,
       finishedAt: req.finishedAt ?? Date.now(),
       ...(req.occurredAt !== undefined ? { occurredAt: req.occurredAt } : {}),
+      ...(attributedPeriods.length ? { attributedPeriods } : {}),
       bucketIds: req.attributedBuckets?.map((t) => t.bucketId) ?? [],
     });
   // Reporting is independent of whether enforcement is configured.
@@ -1793,6 +1942,7 @@ async function foldOne(ctx: MutationCtx, req: Doc<"requests"> | null) {
     checkedAccounting({
       settled: true,
       ...(req.revisionPending ? { revisionPending: undefined } : {}),
+      ...(attributedPeriods.length ? { attributedPeriods } : {}),
     }),
   );
 }
@@ -2498,6 +2648,9 @@ export const setBucketLimits = mutation({
     dailyTokenLimit: v.optional(v.union(v.number(), v.null())),
     monthlyTokenLimit: v.optional(v.union(v.number(), v.null())),
     lifetimeTokenLimit: v.optional(v.union(v.number(), v.null())),
+    periodSpendLimitNanos: v.optional(v.union(v.number(), v.null())),
+    periodTokenLimit: v.optional(v.union(v.number(), v.null())),
+    period: v.optional(v.object({ start: v.number(), end: v.number() })),
     warnAtPct: v.optional(v.union(v.number(), v.null())),
     enforcement: v.optional(
       v.union(v.literal("hard"), v.literal("soft"), v.null()),
@@ -2515,6 +2668,14 @@ export const setBucketLimits = mutation({
     assertAmount(args.dailyTokenLimit, "dailyTokenLimit");
     assertAmount(args.monthlyTokenLimit, "monthlyTokenLimit");
     assertAmount(args.lifetimeTokenLimit, "lifetimeTokenLimit");
+    assertAmount(args.periodSpendLimitNanos, "periodSpendLimitNanos");
+    assertAmount(args.periodTokenLimit, "periodTokenLimit");
+    if (args.period) {
+      assertTimestamp(args.period.start, "period.start");
+      assertTimestamp(args.period.end, "period.end");
+      if (args.period.end <= args.period.start)
+        throw new Error("period must be a valid half-open timestamp range");
+    }
     assertFraction(args.warnAtPct, "warnAtPct");
     const bucket = await getOrCreateBucket(
       ctx,
@@ -2525,17 +2686,60 @@ export const setBucketLimits = mutation({
     const { dimension: _d, value: _v, actorId: _actor, ...limits } = args;
     assertKey(args.dimension, "dimension", 64);
     assertKey(args.value, "value");
-    const patch = Object.fromEntries(
+    const patch: Partial<Doc<"buckets">> = Object.fromEntries(
       Object.entries(limits)
         .filter(([, value]) => value !== undefined)
         .map(([key, value]) => [key, value === null ? undefined : value]),
     );
+    const nextPeriod = args.period ?? bucket.period;
+    if (
+      (args.periodSpendLimitNanos != null || args.periodTokenLimit != null) &&
+      !nextPeriod
+    )
+      throw new Error("A period limit requires a period");
+    if (
+      args.period &&
+      (args.period.start !== bucket.period?.start ||
+        args.period.end !== bucket.period?.end)
+    ) {
+      const latest = await ctx.db
+        .query("usage")
+        .withIndex("bucket_period_start", (q) =>
+          q
+            .eq("dimension", bucket.dimension)
+            .eq("value", bucket.value)
+            .eq("period", "period"),
+        )
+        .order("desc")
+        .first();
+      if (latest && args.period.start < latest.periodEnd!)
+        throw new Error(
+          "New periods must follow existing periods without overlap",
+        );
+      patch.currentPeriodId = await ctx.db.insert("usage", {
+        dimension: bucket.dimension,
+        value: bucket.value,
+        period: "period",
+        stamp: new Date(args.period.start).toISOString(),
+        periodStart: args.period.start,
+        periodEnd: args.period.end,
+        spendNanos: 0,
+        tokens: 0,
+        requests: 0,
+        reservedNanos: 0,
+        reservedTokens: 0,
+      });
+    }
     await ctx.db.patch("buckets", bucket._id, patch);
     const updated = (await ctx.db.get("buckets", bucket._id))!;
     await syncPolicy(ctx, updated);
-    // New empty buckets need no scan. Existing uncapped buckets must catch up
-    // before admission can trust their counters or maxConcurrent.
-    if (!needsReserve(bucket) && needsReserve(updated)) {
+    // First-period activation must adopt period holds even when calendar or
+    // concurrency holds already exist. Fence admission until adoption finishes.
+    if (
+      needsReserve(updated) &&
+      (!needsReserve(bucket) ||
+        (!bucket.currentPeriodId && updated.currentPeriodId))
+    ) {
       const pending = await attributedRequests(
         ctx,
         bucket.dimension,
@@ -2649,8 +2853,7 @@ export const reconcileBucket = internalMutation({
       if (
         req.status !== "pending" ||
         req.reservationReleased ||
-        !needsReserve(initial) ||
-        req.heldBucketIds?.includes(bucketId)
+        !needsReserve(initial)
       )
         continue;
       const original = req.attributedBuckets?.find(
@@ -2673,32 +2876,53 @@ export const reconcileBucket = internalMutation({
       const m = req.reservationMonth ?? day.slice(0, 7);
       const cost = req.estimatedNanos ?? 0,
         tokens = req.estimatedTokens ?? 0;
-      await ctx.db.patch(
-        "buckets",
-        bucketId,
-        checkedAccounting({
-          ...windowResets(b, today, month),
-          dayStamp: today,
-          monthStamp: month,
-          spendTodayNanos: n.spendTodayNanos,
-          tokensToday: n.tokensToday,
-          spendThisMonthNanos: n.spendThisMonthNanos,
-          tokensThisMonth: n.tokensThisMonth,
-          reservedTodayNanos:
-            (n.reservedTodayNanos ?? 0) + (day === today ? cost : 0),
-          reservedMonthNanos:
-            (n.reservedMonthNanos ?? 0) + (m === month ? cost : 0),
-          reservedTotalNanos: (b.reservedTotalNanos ?? 0) + cost,
-          reservedTodayTokens:
-            (n.reservedTodayTokens ?? 0) + (day === today ? tokens : 0),
-          reservedMonthTokens:
-            (n.reservedMonthTokens ?? 0) + (m === month ? tokens : 0),
-          reservedTotalTokens: (b.reservedTotalTokens ?? 0) + tokens,
-          pendingCount: (b.pendingCount ?? 0) + 1,
-        }),
+      const ownsBucket = req.heldBucketIds?.includes(bucketId) ?? false;
+      const previousPeriod = req.reservationPeriods?.find(
+        (p) => p.bucketId === bucketId,
       );
+      const period =
+        b.currentPeriodId && !previousPeriod
+          ? await periodAt(ctx, b, req._creationTime)
+          : null;
+      if (ownsBucket && !period) continue;
+      if (period) await reservePeriod(ctx, period._id, cost, tokens);
+      if (!ownsBucket)
+        await ctx.db.patch(
+          "buckets",
+          bucketId,
+          checkedAccounting({
+            ...windowResets(b, today, month),
+            dayStamp: today,
+            monthStamp: month,
+            spendTodayNanos: n.spendTodayNanos,
+            tokensToday: n.tokensToday,
+            spendThisMonthNanos: n.spendThisMonthNanos,
+            tokensThisMonth: n.tokensThisMonth,
+            reservedTodayNanos:
+              (n.reservedTodayNanos ?? 0) + (day === today ? cost : 0),
+            reservedMonthNanos:
+              (n.reservedMonthNanos ?? 0) + (m === month ? cost : 0),
+            reservedTotalNanos: (b.reservedTotalNanos ?? 0) + cost,
+            reservedTodayTokens:
+              (n.reservedTodayTokens ?? 0) + (day === today ? tokens : 0),
+            reservedMonthTokens:
+              (n.reservedMonthTokens ?? 0) + (m === month ? tokens : 0),
+            reservedTotalTokens: (b.reservedTotalTokens ?? 0) + tokens,
+            pendingCount: (b.pendingCount ?? 0) + 1,
+          }),
+        );
       await ctx.db.patch("requests", req._id, {
-        heldBucketIds: [...(req.heldBucketIds ?? []), bucketId],
+        ...(!ownsBucket
+          ? { heldBucketIds: [...(req.heldBucketIds ?? []), bucketId] }
+          : {}),
+        ...(period
+          ? {
+              reservationPeriods: [
+                ...(req.reservationPeriods ?? []),
+                { bucketId, periodId: period._id },
+              ],
+            }
+          : {}),
       });
     }
     if (!page.isDone) {
@@ -2816,6 +3040,19 @@ export const adjustBucket = mutation({
         ...(mSame ? {} : { reservedMonthNanos: 0, reservedMonthTokens: 0 }),
       }),
     );
+    if (b.currentPeriodId) {
+      const period = await ctx.db.get("usage", b.currentPeriodId);
+      if (period)
+        await ctx.db.patch(
+          "usage",
+          period._id,
+          checkedAccounting({
+            spendNanos: period.spendNanos + debit,
+            tokens: Math.max(0, period.tokens + dt),
+            creditsNanos: (period.creditsNanos ?? 0) + credit,
+          }),
+        );
+    }
     await ctx.db.insert("adjustments", {
       dimension,
       value,
@@ -2848,13 +3085,13 @@ export const listAdjustments = query({
       .take(pageSize(limit, 50)),
 });
 
-// Durable spend history for a bucket: per-day or per-month rows, newest first.
+// Durable spend history for a bucket: calendar or anchored rows, newest first.
 // Survives request retention.
 export const usageHistory = query({
   args: {
     dimension: v.string(),
     value: v.string(),
-    period: v.union(v.literal("day"), v.literal("month")),
+    period: v.union(v.literal("day"), v.literal("month"), v.literal("period")),
     limit: v.optional(v.number()),
   },
   returns: v.array(schema.doc("usage")),

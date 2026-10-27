@@ -56,7 +56,7 @@ audit log. The gateway is the zero-config default, never the only option.
 | **Any provider, not just the gateway** | `ai.meter` budgets *any* call — fal, Replicate, image/audio gen, a raw `fetch` — made with your own key, under the same caps and audit log. `chat`/`languageModel` use the gateway; `meter` doesn't require it. |
 | **Attribution** | Each call is attributed to a `userId` **and** the Convex action that made it — auto-detected via `ctx.meta`, no manual tagging. |
 | **Tagged budgets** | `user` and `action` are just built-in *dimensions* — add your own (team, project, customer, env…) via `tags`, and cap any of them. One request can be billed to several buckets at once. |
-| **Spend & token limits** | Per-bucket **daily / monthly / lifetime** spend and token budgets, plus requests-per-minute, a max-concurrent cap, and a block switch. |
+| **Spend & token limits** | Per-bucket **daily / monthly / subscription-period / lifetime** spend and token budgets, plus requests-per-minute, a max-concurrent cap, and a block switch. |
 | **Concurrency-safe admission** | A reserve-then-settle design makes admission atomic against estimated usage, so concurrent requests can't all spend the same remaining budget. Final usage can exceed its reservation; the actual amount is recorded at settlement. |
 | **Hard or soft** | Each limit either **blocks** (`hard`) or **allows-with-a-warning** (`soft`). |
 | **Approaching-limit alerts** | Set `warnAtPct` (e.g. 0.8) and get an `onThreshold` callback before a cap is hit; `onLimitReached` fires when one blocks. |
@@ -392,7 +392,7 @@ different dimensions. Each exposes:
 | `setLimits(ctx, { …, ...limits })` | set/clear caps & controls |
 | `bump(ctx, { …, dailyNanos?, monthlyNanos?, lifetimeNanos? })` | one-time headroom |
 | `adjust(ctx, { …, deltaNanos, reason? })` | manual credit / debit |
-| `history(ctx, { …, period })` | durable day/month spend history |
+| `history(ctx, { …, period })` | durable day/month/anchored-period spend history |
 | `adjustments(ctx, { … })` | the manual-adjustment audit log |
 | `delete(ctx, { … })` | remove the bucket — **`user`** also erases that user's request content (the erasure primitive); other dimensions are **budget closure only** (shared request content is kept, see [Security](#security-before-you-ship)) |
 
@@ -429,6 +429,70 @@ the same amount is a no-op. Concurrent different revisions use transaction order
 Explicit revisions also work after actual request-log retention using the durable
 billing event. Deleted bucket generations are skipped. That event stores the
 current authoritative cost in place; it is not an append-only revision audit log.
+
+### Subscription periods
+
+Give any user, action or tag bucket an app-managed `[start, end)` range in Unix
+milliseconds in years 0000–9999, plus `periodSpendLimitNanos` and/or `periodTokenLimit`:
+
+```ts
+const previous = {
+  start: Date.UTC(2026, 0, 15),
+  end: Date.UTC(2026, 1, 15),
+};
+await ai.users.setLimits(ctx, {
+  userId, period: previous, periodSpendLimitNanos: 300_000_000,
+});
+// Admit work while the selected range contains the current time.
+const job = await ai.begin(ctx, {
+  userId, model: "external/job", estimatedCostNanos: 200_000_000,
+});
+if (!job.allowed) throw new Error(job.reason);
+
+// At renewal time, select a fresh allowance; unused capacity does not roll over.
+await ai.users.setLimits(ctx, {
+  userId,
+  period: { start: previous.end, end: Date.UTC(2026, 2, 15) },
+  periodSpendLimitNanos: 300_000_000,
+});
+// The provider reports a charge after renewal for work completed beforehand.
+await ai.settle(ctx, {
+  requestId: job.requestId, costNanos: 200_000_000,
+  occurredAt: previous.end - 1,
+});
+// A later authoritative correction replaces that old-period charge.
+await ai.settle(ctx, {
+  requestId: job.requestId, costNanos: 80_000_000, revise: true,
+});
+await ai.users.history(ctx, { userId, period: "period" });
+// After folding, newest first: current spent 0; previous spent 80_000_000.
+```
+
+Set the range before admitting its work, then advance it at each renewal; there
+is no automatic renewal or rollover. Ranges are immutable and non-overlapping;
+a new range must follow the previous one. Repeating the current range preserves
+its spend and holds. Changing only its limit also preserves usage: increasing
+300 credits to 700 after spending 200 leaves 500. Clear a period cap with `null`.
+Admission uses processing time and checks the explicitly selected range, including
+its own holds. Hard period caps fail closed before `start` and at or after `end`
+with `<dimension>_period_inactive` until a valid range is selected (or the caps
+are cleared). Supplying a past `occurredAt` does not bypass this check. Soft
+period caps allow outside-range work with a warning. Already-admitted work may
+settle late, including after expiry or renewal; actual charges can exceed holds.
+A hold from before renewal cannot consume or release the new range's capacity.
+First-period activation pauses admission while existing in-flight holds are
+adopted, including on buckets with calendar or concurrency caps. Already-folded
+charges are not backfilled into ranges configured later. Clearing both period
+caps removes enforcement but keeps tracking and its fold writes active; there
+is currently no operation to deselect period tracking.
+
+Occurrence time selects the configured range containing the charge. Late settlement
+of already-admitted work remains valid, including charges in old ranges or gaps;
+gap charges affect calendar/lifetime totals only. Anchored history updates during
+folding; calendar history still drains asynchronously.
+
+Manual `adjust` credits/debits apply to the current range; its credits expire at
+renewal. Existing daily/monthly/lifetime bumps do not increase a period cap.
 
 ### Request rate limits
 
@@ -734,7 +798,7 @@ this design). `ai-budget` instead **reserves then settles**:
    releasing the hold again. After content retention, unresolved requests retain
    a small billing record with prompts and responses removed.
 
-Requests record the exact bucket IDs and calendar windows they reserve.
+Requests record the exact bucket IDs and calendar/anchored windows they reserve.
 Settlement cannot release another request's hold, including across midnight or
 month boundaries. Admission reads separate policy documents; only capped buckets
 require reads of accounting state. Reporting updates still share bucket totals,
@@ -772,6 +836,9 @@ off shared hot rows:
   interval, but backlog and failures can extend that lag. Capped buckets retain
   their reservations until the final charge folds; enabling enforcement pauses
   admission until existing spend and in-flight work have been reconciled.
+  An opt-in anchored period adds a transactional write to its own window row.
+  The additional usage index also indexes calendar rows; schema/index overhead
+  is shared even when no bucket selects a period.
 
 The `error.md` file documents the adversarial audits this design survived, with
 live repros.

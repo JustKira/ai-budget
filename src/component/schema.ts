@@ -32,13 +32,15 @@ export default defineSchema({
     tokens: v.number(),
     finishedAt: v.number(),
     occurredAt: v.optional(v.number()),
+    attributedPeriods: v.optional(v.array(v.id("usage"))),
     // A durable, PII-light billing ledger: the row stores NO prompt/response
     // content and NO user identifier field. `bucketIds` are opaque handles —
     // resolvable to a (dimension, value) only by joining the `buckets` table in
     // the same deployment, and left dangling once a bucket is deleted. So the
-    // ledger exported on its own carries no identities; within the deployment a
-    // live user-dimension bucket id still resolves to its userId (billing
-    // inherently knows who was charged).
+    // ledger exported on its own carries no identities. `attributedPeriods`
+    // likewise resolves to bucket keys through live usage rows. Both references
+    // become dangling when the bucket and its history are deleted; within the
+    // deployment billing inherently knows who was charged.
     bucketIds: v.array(v.id("buckets")),
   }).index("requestId", ["requestId"]),
   admissionKeys: defineTable({
@@ -67,6 +69,10 @@ export default defineSchema({
     dailyTokenLimit: v.optional(v.number()),
     monthlyTokenLimit: v.optional(v.number()),
     lifetimeTokenLimit: v.optional(v.number()),
+    periodSpendLimitNanos: v.optional(v.number()),
+    periodTokenLimit: v.optional(v.number()),
+    period: v.optional(v.object({ start: v.number(), end: v.number() })),
+    currentPeriodId: v.optional(v.id("usage")),
     blocked: v.optional(v.boolean()), // hard block (was `blocked`/`disabled`)
     // Fire an approaching-limit alert once usage crosses this fraction of a cap
     // (e.g. 0.8 = warn at 80%). Falls back to the deployment default.
@@ -91,6 +97,10 @@ export default defineSchema({
     dailyTokenLimit: v.optional(v.number()),
     monthlyTokenLimit: v.optional(v.number()),
     lifetimeTokenLimit: v.optional(v.number()),
+    periodSpendLimitNanos: v.optional(v.number()),
+    periodTokenLimit: v.optional(v.number()),
+    period: v.optional(v.object({ start: v.number(), end: v.number() })),
+    currentPeriodId: v.optional(v.id("usage")),
     blocked: v.optional(v.boolean()), // hard block (was `blocked`/`disabled`)
     // Fire an approaching-limit alert once usage crosses this fraction of a cap
     // (e.g. 0.8 = warn at 80%). Falls back to the deployment default.
@@ -140,18 +150,32 @@ export default defineSchema({
   // Durable per-(bucket, period) spend history. Written from settled requests
   // and manual adjustments; NEVER swept by request retention, so spend charts
   // and "what did we spend last month" survive long after the raw request rows
-  // are purged. period is "day" ("2026-09-04") or "month" ("2026-09").
+  // are purged. Calendar rows use day/month stamps. Anchored "period" rows
+  // use an ISO start stamp and immutable bounds; their holds and totals update
+  // live, so admission can read them atomically even before calendar rollup.
   usage: defineTable({
     dimension: v.string(),
     value: v.string(),
-    period: v.union(v.literal("day"), v.literal("month")),
+    period: v.union(v.literal("day"), v.literal("month"), v.literal("period")),
+    // Anchored windows remain addressable after renewal and request retention.
+    periodStart: v.optional(v.number()),
+    periodEnd: v.optional(v.number()),
+    creditsNanos: v.optional(v.number()),
+    reservedNanos: v.optional(v.number()),
+    reservedTokens: v.optional(v.number()),
     stamp: v.string(),
     spendNanos: v.number(),
     tokens: v.number(),
     requests: v.number(),
   })
     .index("bucket_period_stamp", ["dimension", "value", "period", "stamp"])
-    .index("period_stamp", ["period", "stamp"]),
+    .index("period_stamp", ["period", "stamp"])
+    .index("bucket_period_start", [
+      "dimension",
+      "value",
+      "period",
+      "periodStart",
+    ]),
 
   // Append-only settlement deltas (H6). foldOne INSERTS one row per attributed
   // dimension here (inserts never conflict), so a shared/uncapped dimension is no
@@ -233,6 +257,16 @@ export default defineSchema({
     finishedAt: v.optional(v.number()),
     // Billing time is separate from processing/retention time.
     occurredAt: v.optional(v.number()),
+    reservationPeriods: v.optional(
+      v.array(
+        v.object({
+          bucketId: v.id("buckets"),
+          periodId: v.id("usage"),
+        }),
+      ),
+    ),
+    // Fixed by the first fold; revisions never resolve attribution again.
+    attributedPeriods: v.optional(v.array(v.id("usage"))),
     estimatedNanos: v.optional(v.number()),
     estimatedTokens: v.optional(v.number()),
     // true when the model had no known/override price and was charged the

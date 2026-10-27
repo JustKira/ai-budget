@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add app-managed subscription periods with spend/token caps, isolated holds,
+  and durable history.
+
 - Add cost-only settlement revisions in the original windows, including after
   request-log retention.
 
