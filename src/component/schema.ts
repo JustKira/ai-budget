@@ -178,8 +178,9 @@ export default defineSchema({
     ]),
 
   // Append-only settlement deltas (H6). foldOne INSERTS one row per attributed
-  // dimension here (inserts never conflict), so a shared/uncapped dimension is no
-  // longer a hot single row on the settle path. The reconciler's rollupPhase
+  // dimension here (inserts never conflict), so a shared/uncapped dimension's
+  // calendar and bucket rows are no longer hot on the settle path. Anchored
+  // period rows are the exception: foldOne patches them synchronously. The reconciler's rollupPhase
   // drains these into `usage` (history) and, for uncapped buckets, into the
   // bucket-row totals — a single writer, so no contention. `drainToRow` is false
   // for capped buckets, whose rows foldOne already updates live for enforcement.

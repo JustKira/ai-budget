@@ -1756,8 +1756,10 @@ async function addCharge(
   // Capped buckets need their row updated LIVE so the next admission sees the
   // spend (enforcement can't wait for the async rollup). They're per-user /
   // low-concurrency, so the row isn't a hot contention point. Uncapped buckets
-  // (the shared action/tag rows) get NO write here — only an append-only delta
-  // the reconciler drains — so a hot shared dimension never serializes settles.
+  // (the shared action/tag rows) get NO bucket-row write here — only an
+  // append-only delta the reconciler drains. An anchored period row is the
+  // exception: foldOne patches it synchronously, so an uncapped bucket with an
+  // anchored range still writes one shared row per settle.
   const capped = await bucketIsCapped(ctx, t.dimension, t.value);
   if (capped) {
     const b = bNow;
@@ -2066,8 +2068,9 @@ async function drainDelta(ctx: MutationCtx, d: Doc<"usageDeltas">) {
 
 // H6: drain append-only settlement deltas into the durable `usage` history (all
 // buckets) and the uncapped bucket-row totals — as a single writer, so the hot
-// settle path never contends on a shared dimension's row. Self-reschedules while
-// backlogged.
+// settle path does not contend on a shared dimension's calendar or bucket row
+// (anchored period rows are still patched synchronously by foldOne).
+// Self-reschedules while backlogged.
 export const rollupPhase = internalMutation({
   args: {},
   returns: v.object({ drained: v.number() }),
