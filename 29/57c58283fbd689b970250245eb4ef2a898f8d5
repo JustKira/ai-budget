@@ -1,0 +1,33 @@
+CHANGELOG.md
+  s_9b1ecd85c3f4ed::t_663867c988f6b8 5-7
+README.md
+  s_9b1ecd85c3f4ed::t_e6eb0cdd159b7d 59,395,433-496,801,839-841
+src/client/index.ts
+  s_9b1ecd85c3f4ed::t_83239a467783a8 299-302,1155,1158
+src/client/security.test.ts
+  s_9b1ecd85c3f4ed::t_75f6ee132b866f 343-357
+src/component/_generated/component.ts
+  s_9b1ecd85c3f4ed::t_c14b1d01b5f5c3 102,127,143-145,214,248,277,311,333,367,412,428-430,480,514,591,607-609,654-656,762,768,770-772,774-775
+src/component/lib.ts
+  s_9b1ecd85c3f4ed::t_406f20554f9539 485-523,589-590,621-625,632-633,642-664,772-773,780-782,862-865,1245-1264,1266-1272,1372-1373,1415-1421,1691,1709-1710,1840-1848,1877-1880,1896-1915,1931,1945,2651-2653,2671-2678,2689,2694-2732,2736-2742,2856,2879-2881,2883-2913,2915-2925,3043-3055,3088,3094
+src/component/periods.test.ts
+  s_9b1ecd85c3f4ed::t_cdc3934d19a2b1 1-386
+src/component/schema.ts
+  s_9b1ecd85c3f4ed::t_20769d122a2d68 35,40-43,72-75,100-103,153-155,159-165,172-178,260-269
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2957c58283fbd689b970250245eb4ef2a898f8d5",
+  "prompts": {},
+  "sessions": {
+    "s_9b1ecd85c3f4ed": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17de3-1590-77a3-bcad-dac4a06a45f1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
